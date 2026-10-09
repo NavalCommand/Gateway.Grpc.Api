@@ -13,7 +13,7 @@ template <class T> void print(const char *label, const T &value) {
 }
 int main(int argc, char **argv) {
   std::string endpoint = "127.0.0.1:50051";
-  bool smoke = false, blocked = false;
+  bool smoke = false, blocked = false, reload = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--schema") {
@@ -27,6 +27,8 @@ int main(int argc, char **argv) {
       smoke = true;
     else if (a == "--blocked")
       blocked = true;
+    else if (a == "--reload")
+      reload = true;
     else if (a != "--endpoint") {
       std::cerr << "Usage: naval-cli [--endpoint 127.0.0.1:port] "
                    "[--smoke|--blocked] (default read-only)\n";
@@ -48,6 +50,16 @@ int main(int argc, char **argv) {
     return 3;
   }
   print("view", w);
+  if(reload){
+    const auto old=w;
+    bool changed=false;
+    for(int i=0;i<240;++i){std::this_thread::sleep_for(std::chrono::milliseconds(250));WorldSnapshot next;if(query(next)&&next.session().session_id()!=old.session().session_id()){w=next;changed=true;break;}}
+    if(!changed||old.own_units().empty()||w.own_units().empty())return 12;
+    OrderRequest stale;stale.set_session_id(old.session().session_id());stale.set_request_id("reload-stale");stale.set_entity_id(old.own_units(0).id());stale.set_based_on_version(old.observation_version());stale.mutable_waypoint()->set_latitude_deg(old.own_units(0).position().latitude_deg()+.03);stale.mutable_waypoint()->set_longitude_deg(old.own_units(0).position().longitude_deg());
+    OrderResult rejected;{grpc::ClientContext c;if(!stub->SubmitOrder(&c,stale,&rejected).ok())return 13;}print("old-session-rejected",rejected);if(rejected.stage()!=REJECTED||rejected.reason()!="stale_session")return 14;
+    stale.set_session_id(w.session().session_id());stale.set_request_id("reload-old-handle");stale.set_based_on_version(w.observation_version());{grpc::ClientContext c;if(!stub->SubmitOrder(&c,stale,&rejected).ok())return 15;}print("old-handle-rejected",rejected);if(rejected.reason()!="wrong_side_or_invalid_entity")return 16;
+    print("reloaded-view",w);std::cout<<"RELOAD_PASS"<<std::endl;return 0;
+  }
   if (!smoke && !blocked)
     return 0;
   if (w.own_units().empty())
@@ -57,6 +69,7 @@ int main(int argc, char **argv) {
     for (auto &x : w.own_units())
       for (auto &e : x.orders())
         if (e.availability() == (blocked ? BLOCKED : EXECUTABLE) &&
+            (!blocked || e.reason()=="protected_native_action") &&
             e.kind() == "set_waypoint") {
           u = &x;
           break;
