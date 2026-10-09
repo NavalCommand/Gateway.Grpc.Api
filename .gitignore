@@ -1,0 +1,7 @@
+out/
+bin/
+obj/
+packages/
+*.user
+CMakeUserPresets.json
+

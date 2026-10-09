@@ -1,0 +1,13 @@
+syntax = "proto3";
+package navalcommand.gateway.v1;
+import "navalcommand/gateway/v1/session.proto";
+import "navalcommand/gateway/v1/world.proto";
+import "navalcommand/gateway/v1/orders.proto";
+service Gateway {
+  rpc Connect(Query) returns (Session);
+  rpc GetView(Query) returns (WorldSnapshot);
+  rpc DiscoverOrders(Query) returns (OrderDiscovery);
+  rpc SubmitOrder(OrderRequest) returns (OrderResult);
+  rpc GetStatus(Query) returns (OrderResult);
+}
+
