@@ -19,3 +19,4 @@ IndentExternBlock: Indent
 BinPackParameters: OnePerLine
 BinPackArguments: false
 AllowShortEnumsOnASingleLine: false
+AccessModifierOffset: -4

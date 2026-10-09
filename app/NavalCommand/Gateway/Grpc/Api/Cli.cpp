@@ -6,29 +6,39 @@
 #include <string>
 #include <thread>
 using namespace navalcommand::gateway::v1;
-template <class T> void print(const char *label, const T &value) {
-	std::string s;
-	google::protobuf::util::MessageToJsonString(value, &s);
-	std::cout << label << " " << s << std::endl;
+namespace {
+constexpr auto RPC_TIMEOUT = std::chrono::seconds(3);
+constexpr auto POLL_INTERVAL = std::chrono::milliseconds(250);
+constexpr int MAXIMUM_STATUS_POLLS = 240;
+constexpr int MAXIMUM_PROTECTED_STATE_POLLS = 100;
+constexpr double WAYPOINT_LATITUDE_OFFSET_DEGREES = 0.03;
+constexpr double MINIMUM_DISPLACEMENT_METERS = 5;
+} // namespace
+template <class T> void Print(const char *label, const T &value) {
+	std::string jsonText;
+	google::protobuf::util::MessageToJsonString(value, &jsonText);
+	std::cout << label << " " << jsonText << std::endl;
 }
 int main(int argc, char **argv) {
 	std::string endpoint = "127.0.0.1:50051";
-	bool smoke = false, blocked = false, reload = false;
-	for (int i = 1; i < argc; ++i) {
-		std::string a = argv[i];
-		if (a == "--schema") {
+	bool smoke = false;
+	bool blocked = false;
+	bool reload = false;
+	for (int pollIndex = 1; pollIndex < argc; ++pollIndex) {
+		std::string argument = argv[pollIndex];
+		if (argument == "--schema") {
 			std::cout << WorldSnapshot::descriptor()->full_name() << " " << Gateway::service_full_name() << std::endl;
 			return 0;
 		}
-		if (a == "--endpoint" && i + 1 < argc) {
-			endpoint = argv[++i];
-		} else if (a == "--smoke") {
+		if (argument == "--endpoint" && pollIndex + 1 < argc) {
+			endpoint = argv[++pollIndex];
+		} else if (argument == "--smoke") {
 			smoke = true;
-		} else if (a == "--blocked") {
+		} else if (argument == "--blocked") {
 			blocked = true;
-		} else if (a == "--reload") {
+		} else if (argument == "--reload") {
 			reload = true;
-		} else if (a != "--endpoint") {
+		} else if (argument != "--endpoint") {
 			std::cerr << "Usage: naval-cli [--endpoint 127.0.0.1:port] "
 						 "[--smoke|--blocked] (default read-only)\n";
 			return 2;
@@ -38,183 +48,184 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	auto stub = Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
-	auto query = [&](WorldSnapshot &w) {
-		grpc::ClientContext c;
-		c.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
-		return stub->GetView(&c, Query{}, &w).ok();
+	auto query = [&](WorldSnapshot &snapshot) {
+		grpc::ClientContext context;
+		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		return stub->GetView(&context, Query{}, &snapshot).ok();
 	};
-	WorldSnapshot w;
-	if (!query(w)) {
+	WorldSnapshot snapshot;
+	if (!query(snapshot)) {
 		std::cerr << "View unavailable\n";
 		return 3;
 	}
-	print("view", w);
+	Print("view", snapshot);
 	if (reload) {
-		const auto old = w;
+		const auto originalSnapshot = snapshot;
 		bool changed = false;
-		for (int i = 0; i < 240; ++i) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
-			WorldSnapshot next;
-			if (query(next) && next.session().session_id() != old.session().session_id()) {
-				w = next;
+		for (int pollIndex = 0; pollIndex < MAXIMUM_STATUS_POLLS; ++pollIndex) {
+			std::this_thread::sleep_for(POLL_INTERVAL);
+			WorldSnapshot nextSnapshot;
+			if (query(nextSnapshot) && nextSnapshot.session().session_id() != originalSnapshot.session().session_id()) {
+				snapshot = nextSnapshot;
 				changed = true;
 				break;
 			}
 		}
-		if (!changed || old.own_units().empty() || w.own_units().empty()) {
+		if (!changed || originalSnapshot.own_units().empty() || snapshot.own_units().empty()) {
 			return 12;
 		}
 		OrderRequest stale;
-		stale.set_session_id(old.session().session_id());
+		stale.set_session_id(originalSnapshot.session().session_id());
 		stale.set_request_id("reload-stale");
-		stale.set_entity_id(old.own_units(0).id());
-		stale.set_based_on_version(old.observation_version());
-		stale.mutable_waypoint()->set_latitude_deg(old.own_units(0).position().latitude_deg() + .03);
-		stale.mutable_waypoint()->set_longitude_deg(old.own_units(0).position().longitude_deg());
+		stale.set_entity_id(originalSnapshot.own_units(0).id());
+		stale.set_based_on_version(originalSnapshot.observation_version());
+		stale.mutable_waypoint()->set_latitude_deg(originalSnapshot.own_units(0).position().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
+		stale.mutable_waypoint()->set_longitude_deg(originalSnapshot.own_units(0).position().longitude_deg());
 		OrderResult rejected;
 		{
-			grpc::ClientContext c;
-			if (!stub->SubmitOrder(&c, stale, &rejected).ok()) {
+			grpc::ClientContext context;
+			if (!stub->SubmitOrder(&context, stale, &rejected).ok()) {
 				return 13;
 			}
 		}
-		print("old-session-rejected", rejected);
+		Print("old-session-rejected", rejected);
 		if (rejected.stage() != REJECTED || rejected.reason() != "stale_session") {
 			return 14;
 		}
-		stale.set_session_id(w.session().session_id());
+		stale.set_session_id(snapshot.session().session_id());
 		stale.set_request_id("reload-old-handle");
-		stale.set_based_on_version(w.observation_version());
+		stale.set_based_on_version(snapshot.observation_version());
 		{
-			grpc::ClientContext c;
-			if (!stub->SubmitOrder(&c, stale, &rejected).ok()) {
+			grpc::ClientContext context;
+			if (!stub->SubmitOrder(&context, stale, &rejected).ok()) {
 				return 15;
 			}
 		}
-		print("old-handle-rejected", rejected);
+		Print("old-handle-rejected", rejected);
 		if (rejected.reason() != "wrong_side_or_invalid_entity") {
 			return 16;
 		}
-		print("reloaded-view", w);
+		Print("reloaded-view", snapshot);
 		std::cout << "RELOAD_PASS" << std::endl;
 		return 0;
 	}
 	if (!smoke && !blocked) {
 		return 0;
 	}
-	if (w.own_units().empty()) {
+	if (snapshot.own_units().empty()) {
 		return 4;
 	}
-	const Unit *u = nullptr;
-	for (int attempt = 0; attempt < (blocked ? 100 : 1); ++attempt) {
-		for (auto &x : w.own_units()) {
-			for (auto &e : x.orders()) {
-				if (e.availability() == (blocked ? BLOCKED : EXECUTABLE) && (!blocked || e.reason() == "protected_native_action") && e.kind() == "set_waypoint") {
-					u = &x;
+	const Unit *selectedUnit = nullptr;
+	for (int attempt = 0; attempt < (blocked ? MAXIMUM_PROTECTED_STATE_POLLS : 1); ++attempt) {
+		for (auto &unit : snapshot.own_units()) {
+			for (auto &eligibility : unit.orders()) {
+				if (eligibility.availability() == (blocked ? BLOCKED : EXECUTABLE) && (!blocked || eligibility.reason() == "protected_native_action") &&
+					eligibility.kind() == "set_waypoint") {
+					selectedUnit = &unit;
 					break;
 				}
 			}
 		}
-		if (u) {
+		if (selectedUnit) {
 			break;
 		}
 		if (blocked) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
-			if (!query(w)) {
+			std::this_thread::sleep_for(POLL_INTERVAL);
+			if (!query(snapshot)) {
 				break;
 			}
 		}
 	}
-	if (!u) {
+	if (!selectedUnit) {
 		std::cerr << "Requested eligible example unavailable\n";
 		return 5;
 	}
-	Query d;
-	d.set_session_id(w.session().session_id());
-	d.set_entity_id(u->id());
+	Query discoveryQuery;
+	discoveryQuery.set_session_id(snapshot.session().session_id());
+	discoveryQuery.set_entity_id(selectedUnit->id());
 	OrderDiscovery discovery;
 	{
-		grpc::ClientContext c;
-		if (!stub->DiscoverOrders(&c, d, &discovery).ok()) {
+		grpc::ClientContext context;
+		if (!stub->DiscoverOrders(&context, discoveryQuery, &discovery).ok()) {
 			return 6;
 		}
 	}
-	print("discovery", discovery);
-	OrderRequest r;
-	r.set_session_id(w.session().session_id());
-	r.set_entity_id(u->id());
-	r.set_based_on_version(w.observation_version());
-	r.set_request_id("smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
-	r.mutable_waypoint()->set_latitude_deg(u->position().latitude_deg() + 0.03);
-	r.mutable_waypoint()->set_longitude_deg(u->position().longitude_deg());
+	Print("discovery", discovery);
+	OrderRequest waypointRequest;
+	waypointRequest.set_session_id(snapshot.session().session_id());
+	waypointRequest.set_entity_id(selectedUnit->id());
+	waypointRequest.set_based_on_version(snapshot.observation_version());
+	waypointRequest.set_request_id("smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+	waypointRequest.mutable_waypoint()->set_latitude_deg(selectedUnit->position().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
+	waypointRequest.mutable_waypoint()->set_longitude_deg(selectedUnit->position().longitude_deg());
 	auto submit = [&](const OrderRequest &request) {
-		grpc::ClientContext c;
-		c.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
+		grpc::ClientContext context;
+		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
 		OrderResult result;
-		if (!stub->SubmitOrder(&c, request, &result).ok()) {
+		if (!stub->SubmitOrder(&context, request, &result).ok()) {
 			result.set_reason("rpc_failed");
 		}
-		print("submit", result);
+		Print("submit", result);
 		return result;
 	};
-	auto wait = [&](const std::string &id, bool outcome) {
+	auto wait = [&](const std::string &requestId, bool requireMovement) {
 		OrderResult result;
-		for (int i = 0; i < 240; ++i) {
-			Query q;
-			q.set_session_id(r.session_id());
-			q.set_request_id(id);
-			grpc::ClientContext c;
-			c.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
-			auto st = stub->GetStatus(&c, q, &result);
-			if (!st.ok()) {
+		for (int pollIndex = 0; pollIndex < MAXIMUM_STATUS_POLLS; ++pollIndex) {
+			Query statusQuery;
+			statusQuery.set_session_id(waypointRequest.session_id());
+			statusQuery.set_request_id(requestId);
+			grpc::ClientContext context;
+			context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+			auto rpcStatus = stub->GetStatus(&context, statusQuery, &result);
+			if (!rpcStatus.ok()) {
 				break;
 			}
-			if (result.stage() == REJECTED || result.stage() == MOVEMENT_OBSERVED || (!outcome && result.stage() == NATIVE_TASK_CREATED)) {
+			if (result.stage() == REJECTED || result.stage() == MOVEMENT_OBSERVED || (!requireMovement && result.stage() == NATIVE_TASK_CREATED)) {
 				break;
 			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			std::this_thread::sleep_for(POLL_INTERVAL);
 		}
-		print("status", result);
+		Print("status", result);
 		return result;
 	};
 	if (blocked) {
-		submit(r);
-		return wait(r.request_id(), false).stage() == REJECTED ? 0 : 7;
+		submit(waypointRequest);
+		return wait(waypointRequest.request_id(), false).stage() == REJECTED ? 0 : 7;
 	}
-	int n = 0;
+	int invalidRequestIndex = 0;
 	for (auto reason : {"stale_session", "wrong_side_or_invalid_entity", "invalid_arguments", "stale_observation"}) {
-		auto bad = r;
-		bad.set_request_id(r.request_id() + "-bad" + std::to_string(n++));
-		std::string v = reason;
-		if (v == "stale_session") {
-			bad.set_session_id("old");
+		auto invalidRequest = waypointRequest;
+		invalidRequest.set_request_id(waypointRequest.request_id() + "-bad" + std::to_string(invalidRequestIndex++));
+		std::string expectedReason = reason;
+		if (expectedReason == "stale_session") {
+			invalidRequest.set_session_id("old");
 		}
-		if (v == "wrong_side_or_invalid_entity") {
-			bad.set_entity_id("opponent-does-not-exist");
+		if (expectedReason == "wrong_side_or_invalid_entity") {
+			invalidRequest.set_entity_id("opponent-does-not-exist");
 		}
-		if (v == "invalid_arguments") {
-			bad.mutable_waypoint()->set_latitude_deg(100);
+		if (expectedReason == "invalid_arguments") {
+			invalidRequest.mutable_waypoint()->set_latitude_deg(100);
 		}
-		if (v == "stale_observation") {
-			bad.set_based_on_version(0);
+		if (expectedReason == "stale_observation") {
+			invalidRequest.set_based_on_version(0);
 		}
-		auto result = submit(bad);
+		auto result = submit(invalidRequest);
 		if (result.stage() != REJECTED) {
-			result = wait(bad.request_id(), false);
+			result = wait(invalidRequest.request_id(), false);
 		}
 		if (result.stage() != REJECTED || result.reason() != reason) {
 			std::cerr << "Rejection mismatch " << reason << std::endl;
 			return 8;
 		}
 	}
-	submit(r);
-	auto result = wait(r.request_id(), true);
-	if (result.stage() != MOVEMENT_OBSERVED || !result.has_displacement_m() || result.displacement_m() < 5) {
+	submit(waypointRequest);
+	auto result = wait(waypointRequest.request_id(), true);
+	if (result.stage() != MOVEMENT_OBSERVED || !result.has_displacement_m() || result.displacement_m() < MINIMUM_DISPLACEMENT_METERS) {
 		return 9;
 	}
 	// Reconnect and retry identical ID: backend must return its retained status.
 	stub = Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
-	auto duplicate = submit(r);
+	auto duplicate = submit(waypointRequest);
 	if (duplicate.stage() != MOVEMENT_OBSERVED) {
 		return 10;
 	}
@@ -222,7 +233,7 @@ int main(int argc, char **argv) {
 	if (!query(finalView)) {
 		return 11;
 	}
-	print("final-view", finalView);
-	std::cout << "SMOKE_PASS request=" << r.request_id() << " movement_m=" << result.displacement_m() << std::endl;
+	Print("final-view", finalView);
+	std::cout << "SMOKE_PASS request=" << waypointRequest.request_id() << " movement_m=" << result.displacement_m() << std::endl;
 	return 0;
 }

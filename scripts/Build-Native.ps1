@@ -2,7 +2,6 @@ param([string]$Preset = 'windows-msvc-release', [string]$CMake = 'cmake', [strin
 $ErrorActionPreference = 'Stop'
 Push-Location "$PSScriptRoot/.."
 try {
-
     $bootstrap = @()
     if ($BuildCMakeSource) {
         $bootstrap += "-DFETCHCONTENT_SOURCE_DIR_NCBUILD=$BuildCMakeSource"
