@@ -10,4 +10,3 @@ service Gateway {
   rpc SubmitOrder(OrderRequest) returns (OrderResult);
   rpc GetStatus(Query) returns (OrderResult);
 }
-
