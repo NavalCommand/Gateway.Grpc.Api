@@ -53,13 +53,17 @@ int main(int argc, char **argv) {
   if (w.own_units().empty())
     return 4;
   const Unit *u = nullptr;
-  for (auto &x : w.own_units())
-    for (auto &e : x.orders())
-      if (e.availability() == (blocked ? BLOCKED : EXECUTABLE) &&
-          e.kind() == "set_waypoint") {
-        u = &x;
-        break;
-      }
+  for (int attempt=0;attempt<(blocked?100:1);++attempt) {
+    for (auto &x : w.own_units())
+      for (auto &e : x.orders())
+        if (e.availability() == (blocked ? BLOCKED : EXECUTABLE) &&
+            e.kind() == "set_waypoint") {
+          u = &x;
+          break;
+        }
+    if(u)break;
+    if(blocked){std::this_thread::sleep_for(std::chrono::milliseconds(250));if(!query(w))break;}
+  }
   if (!u) {
     std::cerr << "Requested eligible example unavailable\n";
     return 5;

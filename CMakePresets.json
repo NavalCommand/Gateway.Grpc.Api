@@ -8,11 +8,12 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "cl.exe",
-        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "$env{NC_CLANG}",
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
         "VCPKG_HOST_TRIPLET": "x64-windows-static-md",
-        "VCPKG_INSTALLED_DIR": "$env{NC_VCPKG_INSTALLED_DIR}"
+        "VCPKG_INSTALLED_DIR": "$env{NC_VCPKG_INSTALLED_DIR}",
+        "CMAKE_CXX_FLAGS": "--target=x86_64-pc-windows-msvc"
       }
     }
   ],
