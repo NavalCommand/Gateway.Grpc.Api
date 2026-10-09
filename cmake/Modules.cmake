@@ -1,4 +1,5 @@
 set(NC_Gateway_Api_URL "C:/Software/GitHub/NavalCommand/Gateway.Api")
-set(NC_Gateway_Api_REV aa0b979e1506e486f2e114061b3d8f46e1e1b652)
+set(NC_Gateway_Api_REV e61fed5447db02934ae232e187a1c3371cb3cd38)
+
 
 

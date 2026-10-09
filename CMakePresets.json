@@ -13,7 +13,16 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
         "VCPKG_HOST_TRIPLET": "x64-windows-static-md",
         "VCPKG_INSTALLED_DIR": "$env{NC_VCPKG_INSTALLED_DIR}",
-        "CMAKE_CXX_FLAGS": "--target=x86_64-pc-windows-msvc"
+        "CMAKE_CXX_FLAGS": "--target=x86_64-pc-windows-msvc",
+        "CMAKE_LINKER": "$env{NC_LINK}",
+        "CMAKE_LINKER_TYPE": "MSVC"
+      }
+    },
+    {
+      "name": "windows-x64-sourcebuilt",
+      "inherits": "windows-x64-release",
+      "cacheVariables": {
+        "VCPKG_MANIFEST_INSTALL": "OFF"
       }
     }
   ],
@@ -22,12 +31,24 @@
       "name": "windows-x64-release",
       "configurePreset": "windows-x64-release",
       "jobs": 8
+    },
+    {
+      "name": "windows-x64-sourcebuilt",
+      "configurePreset": "windows-x64-sourcebuilt",
+      "jobs": 8
     }
   ],
   "testPresets": [
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-x64-sourcebuilt",
+      "configurePreset": "windows-x64-sourcebuilt",
       "output": {
         "outputOnFailure": true
       }

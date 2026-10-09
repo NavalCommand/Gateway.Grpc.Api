@@ -6,6 +6,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIAN
  set(CMAKE_CXX26_EXTENSION_COMPILE_OPTION "/clang:-std=c++2c")
  set(CMAKE_REQUIRED_FLAGS "/clang:-std=c++2c")
 endif()
+add_compile_options(/EHsc /utf-8)
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("#include <expected>\nstatic_assert(__cplusplus >= 202400L); int main(){std::expected<int,int> x=1;return *x-1;}" NC_HAS_EXPECTED)
 if(NOT NC_HAS_EXPECTED)
@@ -30,5 +31,6 @@ function(nc_dependency name)
  endif()
  CPMAddPackage(NAME ${key} GIT_REPOSITORY "${url}" GIT_TAG "${NC_${key}_REV}" OPTIONS "BUILD_TESTING OFF")
 endfunction()
+
 
 
