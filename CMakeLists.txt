@@ -1,21 +1,14 @@
 cmake_minimum_required(VERSION 4.2)
+cmake_policy(SET CMP0168 NEW)
 project(Gateway.Grpc.Api VERSION 0.1.0 LANGUAGES CXX)
-include(cmake/Modules.cmake)
-include(cmake/Common.cmake)
-nc_dependency(Gateway.Api)
-set(gen "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY "${gen}")
-set(path "navalcommand/gateway/v1/service")
-add_custom_command(OUTPUT "${gen}/${path}.pb.cc" "${gen}/${path}.pb.h" "${gen}/${path}.grpc.pb.cc" "${gen}/${path}.grpc.pb.h"
- COMMAND protobuf::protoc --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto --proto_path=${GATEWAY_API_PROTO_DIR} --cpp_out=${gen} --grpc_out=${gen} --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin> "${CMAKE_CURRENT_SOURCE_DIR}/proto/${path}.proto"
- DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/proto/${path}.proto" protobuf::protoc gRPC::grpc_cpp_plugin)
-add_library(Gateway.Grpc.Api STATIC "${gen}/${path}.pb.cc" "${gen}/${path}.grpc.pb.cc")
-target_include_directories(Gateway.Grpc.Api PUBLIC "${gen}")
-target_link_libraries(Gateway.Grpc.Api PUBLIC Gateway.Api gRPC::grpc++)
-add_executable(naval-cli app/Cli.cpp)
-target_link_libraries(naval-cli PRIVATE Gateway.Grpc.Api protobuf::libprotobuf)
-if(PROJECT_IS_TOP_LEVEL)
- enable_testing()
- add_test(NAME imports COMMAND naval-cli --schema)
-endif()
 
+include(FetchContent)
+FetchContent_Declare(ncbuild
+  GIT_REPOSITORY https://github.com/NavalCommand/Build.CMake.git
+  GIT_TAG main)
+FetchContent_MakeAvailable(ncbuild)
+include("${ncbuild_SOURCE_DIR}/NavalCommand.Build.CMake.cmake")
+
+NavalCommandAddDependency(https://github.com/NavalCommand/Gateway.Api.git main)
+
+NavalCommandConfigureModule()
