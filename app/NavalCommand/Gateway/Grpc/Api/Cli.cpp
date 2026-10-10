@@ -1,3 +1,5 @@
+#include <NavalCommand/Gateway/Grpc/Api/LaunchSmoke.h>
+#include <NavalCommand/Gateway/Grpc/Api/MovementSmoke.h>
 #include <chrono>
 #include <google/protobuf/util/json_util.h>
 #include <grpcpp/grpcpp.h>
@@ -24,6 +26,8 @@ int main(int argc, char **argv) {
 	bool smoke = false;
 	bool blocked = false;
 	bool reload = false;
+	bool movement = false;
+	bool launch = false;
 	for (int pollIndex = 1; pollIndex < argc; ++pollIndex) {
 		std::string argument = argv[pollIndex];
 		if (argument == "--schema") {
@@ -38,14 +42,24 @@ int main(int argc, char **argv) {
 			blocked = true;
 		} else if (argument == "--reload") {
 			reload = true;
+		} else if (argument == "--movement-smoke") {
+			movement = true;
+		} else if (argument == "--launch-smoke") {
+			launch = true;
 		} else if (argument != "--endpoint") {
 			std::cerr << "Usage: naval-cli [--endpoint 127.0.0.1:port] "
-						 "[--smoke|--blocked] (default read-only)\n";
+						 "[--smoke|--blocked|--reload|--movement-smoke|--launch-smoke] (default read-only)\n";
 			return 2;
 		}
 	}
 	if (!endpoint.starts_with("127.0.0.1:")) {
 		return 2;
+	}
+	if (movement) {
+		return MovementSmoke(endpoint);
+	}
+	if (launch) {
+		return LaunchSmoke(endpoint);
 	}
 	auto stub = Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
 	auto query = [&](WorldSnapshot &snapshot) {
@@ -190,7 +204,23 @@ int main(int argc, char **argv) {
 	};
 	if (blocked) {
 		submit(waypointRequest);
-		return wait(waypointRequest.request_id(), false).stage() == REJECTED ? 0 : 7;
+		if (wait(waypointRequest.request_id(), false).reason() != "protected_native_action") {
+			return 7;
+		}
+		for (auto mode : {REPLACE_ROUTE, APPEND_WAYPOINT}) {
+			waypointRequest.set_request_id(waypointRequest.request_id() + "-" + std::to_string(mode));
+			waypointRequest.mutable_waypoint()->set_route_mode(mode);
+			submit(waypointRequest);
+			if (wait(waypointRequest.request_id(), false).reason() != "protected_native_action") {
+				return 7;
+			}
+		}
+		WorldSnapshot protectedView;
+		if (!query(protectedView)) {
+			return 7;
+		}
+		Print("protected-after", protectedView);
+		return 0;
 	}
 	int invalidRequestIndex = 0;
 	for (auto reason : {"stale_session", "wrong_side_or_invalid_entity", "invalid_arguments", "stale_observation"}) {
