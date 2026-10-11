@@ -32,12 +32,22 @@ inline int MovementSmoke(const std::string &endpoint) {
 	auto initial = view();
 	std::string entityId;
 	for (const auto &unit : initial.instances()) {
-		if (!unit.subject().has_own_unit_id() || !unit.kinematics().position().has_known()) {
+		if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
 			continue;
 		}
-		for (const auto &eligibility : unit.order_eligibility().items()) {
-			if (eligibility.kind() == "replace_route" && eligibility.availability() == EXECUTABLE) {
-				entityId = unit.subject().own_unit_id();
+		Query discoveryQuery;
+		discoveryQuery.set_session_id(initial.session().session_id());
+		*discoveryQuery.mutable_unit_id() = unit.unit_id();
+		OrderDiscovery discovery;
+		grpc::ClientContext discoveryContext;
+		discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (!stub->DiscoverOrders(&discoveryContext, discoveryQuery, &discovery).ok()) {
+			continue;
+		}
+		print("route-discovery", discovery);
+		for (const auto &eligibility : discovery.eligibility().items()) {
+			if (eligibility.kind() == ORDER_KIND_REPLACE_ROUTE && eligibility.availability() == EXECUTABLE) {
+				entityId = unit.unit_id().value();
 				break;
 			}
 		}
@@ -54,14 +64,14 @@ inline int MovementSmoke(const std::string &endpoint) {
 		auto snapshot = view();
 		OrderRequest command;
 		command.set_session_id(snapshot.session().session_id());
-		command.mutable_subject()->set_own_unit_id(entityId);
+		command.mutable_unit_id()->set_value(entityId);
 		command.set_request_id(prefix + suffix);
 		command.set_based_on_version(snapshot.observation_version());
 		for (const auto &unit : snapshot.instances()) {
-			if (!unit.subject().has_own_unit_id() || !unit.kinematics().position().has_known()) {
+			if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
 				continue;
 			}
-			if (unit.subject().own_unit_id() == entityId) {
+			if (unit.unit_id().value() == entityId) {
 				command.mutable_waypoint()->set_latitude_deg(unit.kinematics().position().known().coordinates().latitude_deg() + latitudeOffset);
 				command.mutable_waypoint()->set_longitude_deg(unit.kinematics().position().known().coordinates().longitude_deg() + longitudeOffset);
 				command.mutable_waypoint()->set_route_mode(mode);
@@ -113,11 +123,11 @@ inline int MovementSmoke(const std::string &endpoint) {
 		for (int poll = 0; poll < 20 && !observed; ++poll) {
 			auto snapshot = view();
 			for (const auto &unit : snapshot.instances()) {
-				if (!unit.subject().has_own_unit_id() || !unit.kinematics().position().has_known()) {
+				if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
 					continue;
 				}
-				if (unit.subject().own_unit_id() == entityId && unit.navigation().inspected().has_known() && unit.navigation().inspected().known() &&
-					unit.navigation().planned_route().has_known() && unit.navigation().planned_route().known().points_size() == receipt.route_after_size()) {
+				if (unit.unit_id().value() == entityId && unit.navigation().planned_route().has_known() &&
+					unit.navigation().planned_route().known().points_size() == receipt.route_after_size()) {
 					observed = true;
 					for (int point = 0; point < unit.navigation().planned_route().known().points_size(); ++point) {
 						observed = observed && unit.navigation().planned_route().known().points(point).SerializeAsString() == receipt.route_after(point).SerializeAsString();
@@ -163,7 +173,7 @@ inline int MovementSmoke(const std::string &endpoint) {
 				invalid.set_session_id("old");
 			}
 			if (expected == "wrong_side_or_invalid_entity") {
-				invalid.mutable_subject()->set_own_unit_id("unauthorized");
+				invalid.mutable_unit_id()->set_value("unauthorized");
 			}
 			if (expected == "invalid_arguments") {
 				invalid.mutable_waypoint()->set_latitude_deg(100);

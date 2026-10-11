@@ -42,6 +42,26 @@ int ReloadSmoke(const std::string &endpoint) {
 	Print("view", snapshot);
 
 	const auto originalSnapshot = snapshot;
+	std::string originalUnitId;
+	for (const auto &unit : originalSnapshot.instances()) {
+		Query discoveryQuery;
+		discoveryQuery.set_session_id(originalSnapshot.session().session_id());
+		*discoveryQuery.mutable_unit_id() = unit.unit_id();
+		OrderDiscovery discovery;
+		grpc::ClientContext context;
+		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (stub->DiscoverOrders(&context, discoveryQuery, &discovery).ok() && unit.kinematics().position().has_known()) {
+			for (const auto &eligibility : discovery.eligibility().items()) {
+				if (eligibility.kind() == ORDER_KIND_IDLE_WAYPOINT) {
+					originalUnitId = unit.unit_id().value();
+					break;
+				}
+			}
+		}
+		if (!originalUnitId.empty()) {
+			break;
+		}
+	}
 	bool changed = false;
 	for (int pollIndex = 0; pollIndex < MAXIMUM_STATUS_POLLS; ++pollIndex) {
 		std::this_thread::sleep_for(POLL_INTERVAL);
@@ -52,8 +72,8 @@ int ReloadSmoke(const std::string &endpoint) {
 			break;
 		}
 	}
-	const auto originalOwn = std::ranges::find_if(originalSnapshot.instances(), [](const auto &instance) {
-		return instance.subject().has_own_unit_id() && instance.kinematics().position().has_known();
+	const auto originalOwn = std::ranges::find_if(originalSnapshot.instances(), [&](const auto &instance) {
+		return !originalUnitId.empty() && instance.unit_id().value() == originalUnitId;
 	});
 	if (!changed || originalOwn == originalSnapshot.instances().end()) {
 		return 12;
@@ -62,7 +82,7 @@ int ReloadSmoke(const std::string &endpoint) {
 	OrderRequest stale;
 	stale.set_session_id(originalSnapshot.session().session_id());
 	stale.set_request_id("reload-stale");
-	stale.mutable_subject()->set_own_unit_id(originalOwn->subject().own_unit_id());
+	stale.mutable_unit_id()->set_value(originalOwn->unit_id().value());
 	stale.set_based_on_version(originalSnapshot.observation_version());
 	stale.mutable_waypoint()->set_latitude_deg(originalOwn->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
 	stale.mutable_waypoint()->set_longitude_deg(originalOwn->kinematics().position().known().coordinates().longitude_deg());
@@ -116,12 +136,21 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	const UnitInstance *selectedUnit = nullptr;
 	for (int attempt = 0; attempt < (blocked ? MAXIMUM_PROTECTED_STATE_POLLS : 1); ++attempt) {
 		for (auto &unit : snapshot.instances()) {
-			if (!unit.subject().has_own_unit_id() || !unit.kinematics().position().has_known()) {
+			if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
 				continue;
 			}
-			for (auto &eligibility : unit.order_eligibility().items()) {
+			Query candidateQuery;
+			candidateQuery.set_session_id(snapshot.session().session_id());
+			*candidateQuery.mutable_unit_id() = unit.unit_id();
+			OrderDiscovery candidateDiscovery;
+			grpc::ClientContext candidateContext;
+			candidateContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+			if (!stub->DiscoverOrders(&candidateContext, candidateQuery, &candidateDiscovery).ok()) {
+				continue;
+			}
+			for (auto &eligibility : candidateDiscovery.eligibility().items()) {
 				if (eligibility.availability() == (blocked ? BLOCKED : EXECUTABLE) && (!blocked || eligibility.reason() == "protected_native_action") &&
-					eligibility.kind() == "set_waypoint") {
+					eligibility.kind() == ORDER_KIND_IDLE_WAYPOINT) {
 					selectedUnit = &unit;
 					break;
 				}
@@ -144,7 +173,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 
 	Query discoveryQuery;
 	discoveryQuery.set_session_id(snapshot.session().session_id());
-	discoveryQuery.mutable_subject()->set_own_unit_id(selectedUnit->subject().own_unit_id());
+	*discoveryQuery.mutable_unit_id() = selectedUnit->unit_id();
 	OrderDiscovery discovery;
 	{
 		grpc::ClientContext context;
@@ -156,7 +185,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 
 	OrderRequest waypointRequest;
 	waypointRequest.set_session_id(snapshot.session().session_id());
-	waypointRequest.mutable_subject()->set_own_unit_id(selectedUnit->subject().own_unit_id());
+	*waypointRequest.mutable_unit_id() = selectedUnit->unit_id();
 	waypointRequest.set_based_on_version(snapshot.observation_version());
 	waypointRequest.set_request_id("smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
 	waypointRequest.mutable_waypoint()->set_latitude_deg(selectedUnit->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
@@ -222,7 +251,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 			invalidRequest.set_session_id("old");
 		}
 		if (expectedReason == "wrong_side_or_invalid_entity") {
-			invalidRequest.mutable_subject()->set_own_unit_id("opponent-does-not-exist");
+			invalidRequest.mutable_unit_id()->set_value("opponent-does-not-exist");
 		}
 		if (expectedReason == "invalid_arguments") {
 			invalidRequest.mutable_waypoint()->set_latitude_deg(100);

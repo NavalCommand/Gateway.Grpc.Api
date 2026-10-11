@@ -36,18 +36,33 @@ inline int LaunchSmoke(const std::string &endpoint) {
 		request.set_based_on_version(initial.observation_version());
 		bool found = false;
 		bool resourceBlocked = false;
-		for (const auto &facility : initial.facilities()) {
-			for (const auto &stock : facility.stocks()) {
-				for (const auto &option : stock.launch_options()) {
-					if (stock.unreserved_count() > 0 && (option.availability() == EXECUTABLE || option.reason() == "resources_unavailable")) {
-						request.mutable_subject()->set_own_unit_id(facility.entity_id());
-						auto launch = request.mutable_facility_launch();
-						launch->set_class_key(stock.class_key());
-						launch->set_squadron(stock.squadron());
-						launch->set_loadout(option.loadout());
-						launch->set_count(1);
+		for (const auto &unit : initial.instances()) {
+			if (!unit.has_air_operations()) {
+				continue;
+			}
+			Query discoveryQuery;
+			discoveryQuery.set_session_id(initial.session().session_id());
+			*discoveryQuery.mutable_unit_id() = unit.unit_id();
+			OrderDiscovery discovery;
+			grpc::ClientContext discoveryContext;
+			discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+			if (!stub->DiscoverOrders(&discoveryContext, discoveryQuery, &discovery).ok()) {
+				continue;
+			}
+			print("launch-discovery", discovery);
+			for (const auto &eligibility : discovery.eligibility().items()) {
+				if (eligibility.kind() != ORDER_KIND_LAUNCH_AIRCRAFT || !eligibility.has_launch_option() ||
+					(eligibility.availability() != EXECUTABLE && eligibility.reason() != "resources_unavailable")) {
+					continue;
+				}
+				for (const auto &entry : unit.air_operations().inventory().items()) {
+					if (entry.unit_type_id().value() == eligibility.launch_option().unit_type_id().value() &&
+						entry.squadron() == eligibility.launch_option().squadron() &&
+						entry.unreserved_count().has_known() && entry.unreserved_count().known() > 0) {
+						*request.mutable_unit_id() = unit.unit_id();
+						*request.mutable_aircraft_launch() = eligibility.launch_option();
 						found = true;
-						resourceBlocked = option.availability() != EXECUTABLE;
+						resourceBlocked = eligibility.availability() != EXECUTABLE;
 						break;
 					}
 				}
@@ -94,15 +109,19 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			bool restored = false;
 			for (int poll = 0; poll < 40 && !restored; ++poll) {
 				auto snapshot = view();
-				for (const auto &facility : snapshot.facilities()) {
-					if (facility.entity_id() == request.subject().own_unit_id()) {
-						for (const auto &stock : facility.stocks()) {
-							if (stock.class_key() == request.facility_launch().class_key() && stock.squadron() == request.facility_launch().squadron()) {
-								for (const auto &option : stock.launch_options()) {
-									restored = restored || (option.loadout() == request.facility_launch().loadout() && option.availability() == EXECUTABLE);
-								}
-							}
-						}
+				Query discoveryQuery;
+				discoveryQuery.set_session_id(snapshot.session().session_id());
+				*discoveryQuery.mutable_unit_id() = request.unit_id();
+				OrderDiscovery discovery;
+				grpc::ClientContext discoveryContext;
+				discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+				if (stub->DiscoverOrders(&discoveryContext, discoveryQuery, &discovery).ok()) {
+					for (const auto &eligibility : discovery.eligibility().items()) {
+						restored = restored || (eligibility.kind() == ORDER_KIND_LAUNCH_AIRCRAFT && eligibility.has_launch_option() &&
+							eligibility.launch_option().unit_type_id().value() == request.aircraft_launch().unit_type_id().value() &&
+							eligibility.launch_option().squadron() == request.aircraft_launch().squadron() &&
+							eligibility.launch_option().loadout_id().value() == request.aircraft_launch().loadout_id().value() &&
+							eligibility.availability() == EXECUTABLE);
 					}
 				}
 				if (!restored) {
@@ -119,19 +138,19 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			invalid.set_request_id(request.request_id() + reason);
 			const std::string expected = reason;
 			if (expected == "invalid_arguments") {
-				invalid.mutable_facility_launch()->set_count(2);
+				invalid.mutable_aircraft_launch()->set_count(2);
 			}
 			if (expected == "unsupported_aircraft") {
-				invalid.mutable_facility_launch()->set_class_key("absent-class");
+				invalid.mutable_aircraft_launch()->mutable_unit_type_id()->set_value("absent-class");
 			}
 			if (expected == "invalid_squadron") {
-				invalid.mutable_facility_launch()->set_squadron("absent-squadron");
+				invalid.mutable_aircraft_launch()->set_squadron("absent-squadron");
 			}
 			if (expected == "invalid_loadout") {
-				invalid.mutable_facility_launch()->set_loadout("absent-loadout");
+				invalid.mutable_aircraft_launch()->mutable_loadout_id()->set_value("absent-loadout");
 			}
 			if (expected == "wrong_side_or_invalid_entity") {
-				invalid.mutable_subject()->set_own_unit_id("not-own");
+				invalid.mutable_unit_id()->set_value("not-own");
 			}
 			if (expected == "stale_observation") {
 				invalid.set_based_on_version(0);
@@ -170,10 +189,10 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			if (receipt.stage() == AIRCRAFT_SPAWNED || receipt.stage() == AIRBORNE) {
 				auto snapshot = view();
 				for (const auto &unit : snapshot.instances()) {
-					if (!unit.subject().has_own_unit_id() || !unit.kinematics().position().has_known()) {
+					if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
 						continue;
 					}
-					if (unit.subject().own_unit_id() == receipt.spawned_entity_id()) {
+					if (unit.unit_id().value() == receipt.spawned_unit_id().value()) {
 						if (receipt.stage() == AIRCRAFT_SPAWNED && unit.has_aircraft() && unit.aircraft().airborne().has_known() && !unit.aircraft().airborne().known()) {
 							spawnedObserved = true;
 							if (poll % 20 == 0) {
