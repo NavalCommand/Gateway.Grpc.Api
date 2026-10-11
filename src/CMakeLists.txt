@@ -3,6 +3,7 @@ find_package(gRPC CONFIG REQUIRED)
 set(generatedDirectory "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generatedDirectory}")
 set(protoRelativePath "navalcommand/gateway/v1/service")
+file(GLOB_RECURSE servicePayloadInputs CONFIGURE_DEPENDS "${GATEWAY_API_PROTO_DIR}/*.proto")
 add_custom_command(
         OUTPUT "${generatedDirectory}/${protoRelativePath}.pb.cc"
         "${generatedDirectory}/${protoRelativePath}.pb.h"
@@ -14,7 +15,7 @@ add_custom_command(
         --grpc_out=${generatedDirectory}
         --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
         "${PROJECT_SOURCE_DIR}/proto/${protoRelativePath}.proto"
-        DEPENDS "${PROJECT_SOURCE_DIR}/proto/${protoRelativePath}.proto" protobuf::protoc
+        DEPENDS "${PROJECT_SOURCE_DIR}/proto/${protoRelativePath}.proto" ${servicePayloadInputs} protobuf::protoc
         gRPC::grpc_cpp_plugin)
 add_library(Gateway.Grpc.Api STATIC "${generatedDirectory}/${protoRelativePath}.pb.cc"
         "${generatedDirectory}/${protoRelativePath}.grpc.pb.cc")
