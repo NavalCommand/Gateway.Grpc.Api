@@ -18,6 +18,17 @@ constexpr int MAXIMUM_STATUS_POLLS = 240;
 constexpr int MAXIMUM_PROTECTED_STATE_POLLS = 100;
 constexpr double WAYPOINT_LATITUDE_OFFSET_DEGREES = 0.03;
 constexpr double MINIMUM_DISPLACEMENT_METERS = 5;
+bool HasCoordinates(const navalcommand::gateway::v1::KinematicsObservation &kinematics) {
+	return kinematics.has_exact_position() ||
+		(kinematics.has_partial_position() && kinematics.partial_position().has_latitude_deg() &&
+			kinematics.partial_position().has_longitude_deg());
+}
+double Latitude(const navalcommand::gateway::v1::KinematicsObservation &kinematics) {
+	return kinematics.has_exact_position() ? kinematics.exact_position().latitude_deg() : kinematics.partial_position().latitude_deg();
+}
+double Longitude(const navalcommand::gateway::v1::KinematicsObservation &kinematics) {
+	return kinematics.has_exact_position() ? kinematics.exact_position().longitude_deg() : kinematics.partial_position().longitude_deg();
+}
 
 template <class T> void Print(const char *label, const T &value) {
 	std::string jsonText;
@@ -60,7 +71,7 @@ int ReloadSmoke(const std::string &endpoint) {
 		OrderDiscovery discovery;
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-		if (stub->DiscoverOrders(&context, discoveryQuery, &discovery).ok() && unit.kinematics().position().has_known()) {
+		if (stub->DiscoverOrders(&context, discoveryQuery, &discovery).ok() && HasCoordinates(unit.kinematics())) {
 			for (const auto &eligibility : discovery.eligibility().items()) {
 				if (eligibility.kind() == ORDER_KIND_IDLE_WAYPOINT) {
 					originalObservationId = unit.identity().value();
@@ -96,8 +107,8 @@ int ReloadSmoke(const std::string &endpoint) {
 	*stale.mutable_observer() = originalSnapshot.observer();
 	*stale.mutable_observation() = originalOwn->identity();
 	stale.set_based_on_version(originalSnapshot.version());
-	stale.mutable_waypoint()->set_latitude_deg(originalOwn->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
-	stale.mutable_waypoint()->set_longitude_deg(originalOwn->kinematics().position().known().coordinates().longitude_deg());
+	stale.mutable_waypoint()->set_latitude_deg(Latitude(originalOwn->kinematics()) + WAYPOINT_LATITUDE_OFFSET_DEGREES);
+	stale.mutable_waypoint()->set_longitude_deg(Longitude(originalOwn->kinematics()));
 	{
 		grpc::ClientContext context;
 		if (!stub->SubmitOrder(&context, stale, &rejected).ok()) {
@@ -157,7 +168,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	const UnitObservation *selectedUnit = nullptr;
 	for (int attempt = 0; attempt < (blocked ? MAXIMUM_PROTECTED_STATE_POLLS : 1); ++attempt) {
 		for (const auto &unit : snapshot.units()) {
-			if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
+			if (unit.identity().value().empty() || !HasCoordinates(unit.kinematics())) {
 				continue;
 			}
 			Query candidateQuery;
@@ -212,8 +223,8 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	*waypointRequest.mutable_observation() = selectedUnit->identity();
 	waypointRequest.set_request_id("route-smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
 	waypointRequest.set_based_on_version(snapshot.version());
-	waypointRequest.mutable_waypoint()->set_latitude_deg(selectedUnit->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
-	waypointRequest.mutable_waypoint()->set_longitude_deg(selectedUnit->kinematics().position().known().coordinates().longitude_deg());
+	waypointRequest.mutable_waypoint()->set_latitude_deg(Latitude(selectedUnit->kinematics()) + WAYPOINT_LATITUDE_OFFSET_DEGREES);
+	waypointRequest.mutable_waypoint()->set_longitude_deg(Longitude(selectedUnit->kinematics()));
 	auto submit = [&](const OrderRequest &request) {
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);

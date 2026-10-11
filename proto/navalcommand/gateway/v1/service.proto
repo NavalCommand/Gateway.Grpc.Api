@@ -3,7 +3,6 @@ package navalcommand.gateway.v1;
 import "navalcommand/gateway/v1/session.proto";
 import "navalcommand/gateway/v1/world.proto";
 import "navalcommand/gateway/v1/orders.proto";
-import "navalcommand/gateway/v1/observation.proto";
 service Gateway {
   rpc Connect(Query) returns (Session);
   rpc GetView(Query) returns (ObserverSnapshot);

@@ -67,15 +67,15 @@ inline int LaunchSmoke(const std::string &endpoint) {
 					(eligibility.availability() != EXECUTABLE && eligibility.reason() != "resources_unavailable")) {
 					continue;
 				}
-				for (const auto &entry : unit.air_operations().inventory().items()) {
-					const bool loadoutObserved = std::ranges::any_of(entry.loadouts().items(), [&](const auto &loadout) {
+				for (const auto &entry : unit.air_operations().inventory()) {
+					const bool loadoutObserved = std::ranges::any_of(entry.loadouts(), [&](const auto &loadout) {
 						return loadout.value() == eligibility.launch_option().selection().loadout().value();
 					});
-					if (entry.type().has_known() &&
-						entry.type().known().value() == eligibility.launch_option().selection().type().value() &&
-						entry.squadron().has_known() &&
-						entry.squadron().known() == eligibility.launch_option().selection().squadron() &&
-						loadoutObserved && entry.unreserved_count().has_known() && entry.unreserved_count().known() > 0) {
+					if (entry.has_type() &&
+						entry.type().value() == eligibility.launch_option().selection().type().value() &&
+						entry.has_squadron() &&
+						entry.squadron() == eligibility.launch_option().selection().squadron() &&
+						loadoutObserved && entry.has_unreserved_count() && entry.unreserved_count() > 0) {
 						*request.mutable_launch_aircraft() = eligibility.launch_option();
 						found = true;
 						resourceBlocked = eligibility.availability() != EXECUTABLE;
@@ -206,17 +206,17 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			if (receipt.stage() == AIRCRAFT_SPAWNED || receipt.stage() == AIRBORNE) {
 				auto snapshot = view();
 				for (const auto &unit : snapshot.units()) {
-					if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
+					if (unit.identity().value().empty()) {
 						continue;
 					}
 					if (receipt.has_spawned_observation_id() && unit.identity().value() == receipt.spawned_observation_id().value()) {
-						if (receipt.stage() == AIRCRAFT_SPAWNED && unit.has_aircraft() && unit.aircraft().airborne().has_known() && !unit.aircraft().airborne().known()) {
+						if (receipt.stage() == AIRCRAFT_SPAWNED && unit.has_aircraft() && unit.aircraft().has_airborne() && !unit.aircraft().airborne()) {
 							spawnedObserved = true;
 							if (poll % 20 == 0) {
 								print("grounded-observed-contact", unit);
 							}
 						}
-						if (receipt.stage() == AIRBORNE && unit.has_aircraft() && unit.aircraft().airborne().has_known() && unit.aircraft().airborne().known() && spawnedObserved) {
+						if (receipt.stage() == AIRBORNE && unit.has_aircraft() && unit.aircraft().has_airborne() && unit.aircraft().airborne() && spawnedObserved) {
 							print("airborne-observed-contact", unit);
 							std::cout << "FACILITY_LAUNCH_PASS" << std::endl;
 							return 0;

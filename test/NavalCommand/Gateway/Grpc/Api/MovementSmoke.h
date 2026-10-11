@@ -12,6 +12,17 @@
 // Explicitly requested development regression, using only the public RPCs.
 inline int MovementSmoke(const std::string &endpoint) {
 	using namespace navalcommand::gateway::v1;
+	auto hasCoordinates = [](const KinematicsObservation &kinematics) {
+		return kinematics.has_exact_position() ||
+			(kinematics.has_partial_position() && kinematics.partial_position().has_latitude_deg() &&
+				kinematics.partial_position().has_longitude_deg());
+	};
+	auto latitude = [](const KinematicsObservation &kinematics) {
+		return kinematics.has_exact_position() ? kinematics.exact_position().latitude_deg() : kinematics.partial_position().latitude_deg();
+	};
+	auto longitude = [](const KinematicsObservation &kinematics) {
+		return kinematics.has_exact_position() ? kinematics.exact_position().longitude_deg() : kinematics.partial_position().longitude_deg();
+	};
 	constexpr auto RPC_TIMEOUT = std::chrono::seconds(3);
 	constexpr auto POLL_INTERVAL = std::chrono::milliseconds(250);
 	constexpr int MAXIMUM_POLLS = 240;
@@ -42,7 +53,7 @@ inline int MovementSmoke(const std::string &endpoint) {
 	auto initial = view();
 	std::string entityId;
 	for (const auto &unit : initial.units()) {
-		if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
+		if (unit.identity().value().empty() || !hasCoordinates(unit.kinematics())) {
 			continue;
 		}
 		Query discoveryQuery;
@@ -80,12 +91,12 @@ inline int MovementSmoke(const std::string &endpoint) {
 		command.set_request_id(prefix + suffix);
 		command.set_based_on_version(snapshot.version());
 		for (const auto &unit : snapshot.units()) {
-			if (!unit.kinematics().position().has_known()) {
+			if (!hasCoordinates(unit.kinematics())) {
 				continue;
 			}
 			if (unit.identity().value() == entityId) {
-				command.mutable_waypoint()->set_latitude_deg(unit.kinematics().position().known().coordinates().latitude_deg() + latitudeOffset);
-				command.mutable_waypoint()->set_longitude_deg(unit.kinematics().position().known().coordinates().longitude_deg() + longitudeOffset);
+				command.mutable_waypoint()->set_latitude_deg(latitude(unit.kinematics()) + latitudeOffset);
+				command.mutable_waypoint()->set_longitude_deg(longitude(unit.kinematics()) + longitudeOffset);
 				command.mutable_waypoint()->set_route_mode(mode);
 			}
 		}
@@ -136,11 +147,11 @@ inline int MovementSmoke(const std::string &endpoint) {
 			auto snapshot = view();
 			for (const auto &unit : snapshot.units()) {
 				if (unit.identity().value() == entityId && unit.has_navigation() &&
-					unit.navigation().planned_route().has_known() &&
-					unit.navigation().planned_route().known().points_size() == receipt.route_after_size()) {
+					unit.navigation().has_planned_route() &&
+					unit.navigation().planned_route().points_size() == receipt.route_after_size()) {
 					observed = true;
 					for (int point = 0; point < receipt.route_after_size(); ++point) {
-						const auto &observedPoint = unit.navigation().planned_route().known().points(point);
+						const auto &observedPoint = unit.navigation().planned_route().points(point);
 						const auto &receiptPoint = receipt.route_after(point);
 						observed = observed && observedPoint.label() == receiptPoint.label() &&
 							observedPoint.latitude_deg() == receiptPoint.latitude_deg() &&
