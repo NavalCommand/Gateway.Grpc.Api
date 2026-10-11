@@ -6,6 +6,7 @@
 #include <iostream>
 #include <navalcommand/gateway/v1/service.grpc.pb.h>
 #include <stdexcept>
+#include <initializer_list>
 #include <thread>
 
 // Explicitly requested development regression, using only the public RPCs.
@@ -21,23 +22,33 @@ inline int MovementSmoke(const std::string &endpoint) {
 		std::cout << label << " " << json << std::endl;
 	};
 	auto view = [&]() {
-		WorldSnapshot snapshot;
+		ObserverSnapshot snapshot;
+		Session session;
+		grpc::ClientContext connectContext;
+		connectContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (!stub->Connect(&connectContext, Query{}, &session).ok() || session.schema_version() != 4) {
+			throw std::runtime_error("session_unavailable");
+		}
+		Query query;
+		query.set_session_id(session.session_id());
+		*query.mutable_observer() = session.observer();
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-		if (!stub->GetView(&context, {}, &snapshot).ok()) {
-			throw std::runtime_error("view_unavailable");
+		if (!stub->GetView(&context, query, &snapshot).ok()) {
+			throw std::runtime_error("observer_snapshot_unavailable");
 		}
 		return snapshot;
 	};
 	auto initial = view();
 	std::string entityId;
-	for (const auto &unit : initial.instances()) {
-		if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
+	for (const auto &unit : initial.units()) {
+		if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
 			continue;
 		}
 		Query discoveryQuery;
-		discoveryQuery.set_session_id(initial.session().session_id());
-		*discoveryQuery.mutable_unit_id() = unit.unit_id();
+		discoveryQuery.set_session_id(initial.session_id());
+		*discoveryQuery.mutable_observer() = initial.observer();
+		*discoveryQuery.mutable_observation() = unit.identity();
 		OrderDiscovery discovery;
 		grpc::ClientContext discoveryContext;
 		discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
@@ -47,7 +58,7 @@ inline int MovementSmoke(const std::string &endpoint) {
 		print("route-discovery", discovery);
 		for (const auto &eligibility : discovery.eligibility().items()) {
 			if (eligibility.kind() == ORDER_KIND_REPLACE_ROUTE && eligibility.availability() == EXECUTABLE) {
-				entityId = unit.unit_id().value();
+				entityId = unit.identity().value();
 				break;
 			}
 		}
@@ -63,15 +74,16 @@ inline int MovementSmoke(const std::string &endpoint) {
 	auto request = [&](const std::string &suffix, RouteMode mode, double latitudeOffset, double longitudeOffset) {
 		auto snapshot = view();
 		OrderRequest command;
-		command.set_session_id(snapshot.session().session_id());
-		command.mutable_unit_id()->set_value(entityId);
+		command.set_session_id(snapshot.session_id());
+		*command.mutable_observer() = snapshot.observer();
+		command.mutable_observation()->set_value(entityId);
 		command.set_request_id(prefix + suffix);
-		command.set_based_on_version(snapshot.observation_version());
-		for (const auto &unit : snapshot.instances()) {
-			if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
+		command.set_based_on_version(snapshot.version());
+		for (const auto &unit : snapshot.units()) {
+			if (!unit.kinematics().position().has_known()) {
 				continue;
 			}
-			if (unit.unit_id().value() == entityId) {
+			if (unit.identity().value() == entityId) {
 				command.mutable_waypoint()->set_latitude_deg(unit.kinematics().position().known().coordinates().latitude_deg() + latitudeOffset);
 				command.mutable_waypoint()->set_longitude_deg(unit.kinematics().position().known().coordinates().longitude_deg() + longitudeOffset);
 				command.mutable_waypoint()->set_route_mode(mode);
@@ -95,6 +107,7 @@ inline int MovementSmoke(const std::string &endpoint) {
 			std::this_thread::sleep_for(POLL_INTERVAL);
 			Query query;
 			query.set_session_id(command.session_id());
+			*query.mutable_observer() = command.observer();
 			query.set_request_id(command.request_id());
 			grpc::ClientContext statusContext;
 			statusContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
@@ -105,32 +118,33 @@ inline int MovementSmoke(const std::string &endpoint) {
 		print("receipt", receipt);
 		return receipt;
 	};
-	auto verify = [&](const OrderResult &receipt, std::initializer_list<std::string> suffixes) {
+	auto verify = [&](const OrderResult &receipt, std::initializer_list<std::string> expectedLabels) {
 		if (receipt.stage() != ROUTE_MUTATED && receipt.stage() != MOVEMENT_OBSERVED) {
 			throw std::runtime_error("route_mutation_not_verified");
 		}
-		if (receipt.route_after_size() != suffixes.size()) {
+		if (receipt.route_after_size() != expectedLabels.size()) {
 			throw std::runtime_error("route_size_mismatch");
 		}
 		int index = 0;
-		for (const auto &suffix : suffixes) {
-			if (receipt.route_after(index++).label() != "NC-" + prefix + suffix) {
+		for (const auto &label : expectedLabels) {
+			if (receipt.route_after(index++).label() != "NC-" + prefix + label) {
 				throw std::runtime_error("route_sequence_mismatch");
 			}
 		}
-		// Independently query the observation: receipts alone do not certify state.
 		bool observed = false;
 		for (int poll = 0; poll < 20 && !observed; ++poll) {
 			auto snapshot = view();
-			for (const auto &unit : snapshot.instances()) {
-				if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
-					continue;
-				}
-				if (unit.unit_id().value() == entityId && unit.navigation().planned_route().has_known() &&
+			for (const auto &unit : snapshot.units()) {
+				if (unit.identity().value() == entityId && unit.has_navigation() &&
+					unit.navigation().planned_route().has_known() &&
 					unit.navigation().planned_route().known().points_size() == receipt.route_after_size()) {
 					observed = true;
-					for (int point = 0; point < unit.navigation().planned_route().known().points_size(); ++point) {
-						observed = observed && unit.navigation().planned_route().known().points(point).SerializeAsString() == receipt.route_after(point).SerializeAsString();
+					for (int point = 0; point < receipt.route_after_size(); ++point) {
+						const auto &observedPoint = unit.navigation().planned_route().known().points(point);
+						const auto &receiptPoint = receipt.route_after(point);
+						observed = observed && observedPoint.label() == receiptPoint.label() &&
+							observedPoint.latitude_deg() == receiptPoint.latitude_deg() &&
+							observedPoint.longitude_deg() == receiptPoint.longitude_deg();
 					}
 				}
 			}
@@ -173,7 +187,7 @@ inline int MovementSmoke(const std::string &endpoint) {
 				invalid.set_session_id("old");
 			}
 			if (expected == "wrong_side_or_invalid_entity") {
-				invalid.mutable_unit_id()->set_value("unauthorized");
+				invalid.mutable_observation()->set_value("unauthorized");
 			}
 			if (expected == "invalid_arguments") {
 				invalid.mutable_waypoint()->set_latitude_deg(100);

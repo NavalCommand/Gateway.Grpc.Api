@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <chrono>
 #include <google/protobuf/util/json_util.h>
 #include <grpcpp/grpcpp.h>
@@ -19,31 +20,42 @@ inline int LaunchSmoke(const std::string &endpoint) {
 		std::cout << label << " " << json << std::endl;
 	};
 	auto view = [&]() {
-		WorldSnapshot snapshot;
+		ObserverSnapshot snapshot;
+		Session session;
+		grpc::ClientContext connectContext;
+		connectContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (!stub->Connect(&connectContext, Query{}, &session).ok() || session.schema_version() != 4) {
+			throw std::runtime_error("launch_session_unavailable");
+		}
+		Query query;
+		query.set_session_id(session.session_id());
+		*query.mutable_observer() = session.observer();
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-		if (!stub->GetView(&context, {}, &snapshot).ok()) {
-			throw std::runtime_error("launch_view_unavailable");
+		if (!stub->GetView(&context, query, &snapshot).ok()) {
+			throw std::runtime_error("launch_observer_snapshot_unavailable");
 		}
 		return snapshot;
 	};
 	try {
 		auto initial = view();
-		print("launch-initial-view", initial);
+		print("launch-initial-observer-snapshot", initial);
 		OrderRequest request;
-		request.set_session_id(initial.session().session_id());
+		request.set_session_id(initial.session_id());
+		*request.mutable_observer() = initial.observer();
 		request.set_request_id("launch-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
-		request.set_based_on_version(initial.observation_version());
+		request.set_based_on_version(initial.version());
 		bool found = false;
 		bool resourceBlocked = false;
-		for (const auto &unit : initial.instances()) {
+		OrderDiscovery discovery;
+		for (const auto &unit : initial.units()) {
 			if (!unit.has_air_operations()) {
 				continue;
 			}
 			Query discoveryQuery;
-			discoveryQuery.set_session_id(initial.session().session_id());
-			*discoveryQuery.mutable_unit_id() = unit.unit_id();
-			OrderDiscovery discovery;
+			discoveryQuery.set_session_id(initial.session_id());
+			*discoveryQuery.mutable_observer() = initial.observer();
+			*discoveryQuery.mutable_observation() = unit.identity();
 			grpc::ClientContext discoveryContext;
 			discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
 			if (!stub->DiscoverOrders(&discoveryContext, discoveryQuery, &discovery).ok()) {
@@ -56,11 +68,15 @@ inline int LaunchSmoke(const std::string &endpoint) {
 					continue;
 				}
 				for (const auto &entry : unit.air_operations().inventory().items()) {
-					if (entry.unit_type_id().value() == eligibility.launch_option().unit_type_id().value() &&
-						entry.squadron() == eligibility.launch_option().squadron() &&
-						entry.unreserved_count().has_known() && entry.unreserved_count().known() > 0) {
-						*request.mutable_unit_id() = unit.unit_id();
-						*request.mutable_aircraft_launch() = eligibility.launch_option();
+					const bool loadoutObserved = std::ranges::any_of(entry.loadouts().items(), [&](const auto &loadout) {
+						return loadout.value() == eligibility.launch_option().selection().loadout().value();
+					});
+					if (entry.type().has_known() &&
+						entry.type().known().value() == eligibility.launch_option().selection().type().value() &&
+						entry.squadron().has_known() &&
+						entry.squadron().known() == eligibility.launch_option().selection().squadron() &&
+						loadoutObserved && entry.unreserved_count().has_known() && entry.unreserved_count().known() > 0) {
+						*request.mutable_launch_aircraft() = eligibility.launch_option();
 						found = true;
 						resourceBlocked = eligibility.availability() != EXECUTABLE;
 						break;
@@ -89,7 +105,7 @@ inline int LaunchSmoke(const std::string &endpoint) {
 				std::this_thread::sleep_for(POLL_INTERVAL);
 				Query query;
 				query.set_session_id(command.session_id());
-				query.set_request_id(command.request_id());
+				*query.mutable_observer() = command.observer();
 				grpc::ClientContext statusContext;
 				statusContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
 				if (!stub->GetStatus(&statusContext, query, &receipt).ok()) {
@@ -110,17 +126,17 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			for (int poll = 0; poll < 40 && !restored; ++poll) {
 				auto snapshot = view();
 				Query discoveryQuery;
-				discoveryQuery.set_session_id(snapshot.session().session_id());
-				*discoveryQuery.mutable_unit_id() = request.unit_id();
-				OrderDiscovery discovery;
+				discoveryQuery.set_session_id(snapshot.session_id());
+				*discoveryQuery.mutable_observer() = snapshot.observer();
+				*discoveryQuery.mutable_observation() = request.observation();
 				grpc::ClientContext discoveryContext;
 				discoveryContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
 				if (stub->DiscoverOrders(&discoveryContext, discoveryQuery, &discovery).ok()) {
 					for (const auto &eligibility : discovery.eligibility().items()) {
 						restored = restored || (eligibility.kind() == ORDER_KIND_LAUNCH_AIRCRAFT && eligibility.has_launch_option() &&
-							eligibility.launch_option().unit_type_id().value() == request.aircraft_launch().unit_type_id().value() &&
-							eligibility.launch_option().squadron() == request.aircraft_launch().squadron() &&
-							eligibility.launch_option().loadout_id().value() == request.aircraft_launch().loadout_id().value() &&
+							eligibility.launch_option().selection().type().value() == request.launch_aircraft().selection().type().value() &&
+							eligibility.launch_option().selection().squadron() == request.launch_aircraft().selection().squadron() &&
+							eligibility.launch_option().selection().loadout().value() == request.launch_aircraft().selection().loadout().value() &&
 							eligibility.availability() == EXECUTABLE);
 					}
 				}
@@ -131,26 +147,26 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			if (!restored) {
 				throw std::runtime_error("resource_shortage_not_restored");
 			}
-			request.set_based_on_version(view().observation_version());
+			request.set_based_on_version(view().version());
 		}
 		for (const auto *reason : {"invalid_arguments", "unsupported_aircraft", "invalid_squadron", "invalid_loadout", "wrong_side_or_invalid_entity", "stale_observation"}) {
 			auto invalid = request;
 			invalid.set_request_id(request.request_id() + reason);
 			const std::string expected = reason;
 			if (expected == "invalid_arguments") {
-				invalid.mutable_aircraft_launch()->set_count(2);
+				invalid.mutable_launch_aircraft()->set_count(2);
 			}
 			if (expected == "unsupported_aircraft") {
-				invalid.mutable_aircraft_launch()->mutable_unit_type_id()->set_value("absent-class");
+				invalid.mutable_launch_aircraft()->mutable_selection()->mutable_type()->set_value("absent-class");
 			}
 			if (expected == "invalid_squadron") {
-				invalid.mutable_aircraft_launch()->set_squadron("absent-squadron");
+				invalid.mutable_launch_aircraft()->mutable_selection()->set_squadron("absent-squadron");
 			}
 			if (expected == "invalid_loadout") {
-				invalid.mutable_aircraft_launch()->mutable_loadout_id()->set_value("absent-loadout");
+				invalid.mutable_launch_aircraft()->mutable_selection()->mutable_loadout()->set_value("absent-loadout");
 			}
 			if (expected == "wrong_side_or_invalid_entity") {
-				invalid.mutable_unit_id()->set_value("not-own");
+				invalid.mutable_observation()->set_value("not-own");
 			}
 			if (expected == "stale_observation") {
 				invalid.set_based_on_version(0);
@@ -160,7 +176,7 @@ inline int LaunchSmoke(const std::string &endpoint) {
 				throw std::runtime_error("launch_negative_mismatch");
 			}
 		}
-		request.set_based_on_version(view().observation_version());
+		request.set_based_on_version(view().version());
 		auto accepted = send(request);
 		if (accepted.stage() != NATIVE_TASK_CREATED && accepted.stage() != PREPARING) {
 			throw std::runtime_error("launch_not_accepted");
@@ -175,6 +191,7 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			std::this_thread::sleep_for(POLL_INTERVAL);
 			Query query;
 			query.set_session_id(request.session_id());
+			*query.mutable_observer() = request.observer();
 			query.set_request_id(request.request_id());
 			OrderResult receipt;
 			grpc::ClientContext context;
@@ -188,19 +205,19 @@ inline int LaunchSmoke(const std::string &endpoint) {
 			}
 			if (receipt.stage() == AIRCRAFT_SPAWNED || receipt.stage() == AIRBORNE) {
 				auto snapshot = view();
-				for (const auto &unit : snapshot.instances()) {
-					if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
+				for (const auto &unit : snapshot.units()) {
+					if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
 						continue;
 					}
-					if (unit.unit_id().value() == receipt.spawned_unit_id().value()) {
+					if (receipt.has_spawned_observation_id() && unit.identity().value() == receipt.spawned_observation_id().value()) {
 						if (receipt.stage() == AIRCRAFT_SPAWNED && unit.has_aircraft() && unit.aircraft().airborne().has_known() && !unit.aircraft().airborne().known()) {
 							spawnedObserved = true;
 							if (poll % 20 == 0) {
-								print("grounded-regular-unit", unit);
+								print("grounded-observed-contact", unit);
 							}
 						}
 						if (receipt.stage() == AIRBORNE && unit.has_aircraft() && unit.aircraft().airborne().has_known() && unit.aircraft().airborne().known() && spawnedObserved) {
-							print("airborne-regular-unit", unit);
+							print("airborne-observed-contact", unit);
 							std::cout << "FACILITY_LAUNCH_PASS" << std::endl;
 							return 0;
 						}

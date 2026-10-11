@@ -36,7 +36,7 @@ int main(int argc, char** argv)
 		std::string argument = argv[pollIndex];
 		if (argument == "--schema")
 		{
-			std::cout << WorldSnapshot::descriptor()->full_name() << " " << Gateway::service_full_name() << std::endl;
+			std::cout << ObserverSnapshot::descriptor()->full_name() << " " << Gateway::service_full_name() << std::endl;
 			return 0;
 		}
 		if (argument == "--endpoint" && pollIndex + 1 < argc)
@@ -92,14 +92,25 @@ int main(int argc, char** argv)
 	}
 
 	auto stub = Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
-	grpc::ClientContext context;
-	context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-	WorldSnapshot snapshot;
-	if (!stub->GetView(&context, Query{}, &snapshot).ok())
+	Session session;
+	grpc::ClientContext connectContext;
+	connectContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+	if (!stub->Connect(&connectContext, Query{}, &session).ok() || session.schema_version() != 4)
 	{
-		std::cerr << "View unavailable\n";
+		std::cerr << "Session unavailable\n";
 		return 3;
 	}
-	Print("view", snapshot);
+	Query query;
+	query.set_session_id(session.session_id());
+	*query.mutable_observer() = session.observer();
+	grpc::ClientContext context;
+	context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+	ObserverSnapshot snapshot;
+	if (!stub->GetView(&context, query, &snapshot).ok())
+	{
+		std::cerr << "Observer snapshot unavailable\n";
+		return 3;
+	}
+	Print("observer-snapshot", snapshot);
 	return 0;
 }

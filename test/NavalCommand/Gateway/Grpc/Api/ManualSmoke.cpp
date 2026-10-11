@@ -29,64 +29,75 @@ template <class T> void Print(const char *label, const T &value) {
 namespace NavalCommand::Gateway::Grpc::Api {
 int ReloadSmoke(const std::string &endpoint) {
 	auto stub = navalcommand::gateway::v1::Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
-	auto query = [&](WorldSnapshot &snapshot) {
+	auto query = [&](ObserverSnapshot &snapshot) {
+		Session session;
+		grpc::ClientContext connectContext;
+		connectContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (!stub->Connect(&connectContext, Query{}, &session).ok() || session.schema_version() != 4) {
+			return false;
+		}
+		Query scopedQuery;
+		scopedQuery.set_session_id(session.session_id());
+		*scopedQuery.mutable_observer() = session.observer();
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-		return stub->GetView(&context, Query{}, &snapshot).ok();
+		return stub->GetView(&context, scopedQuery, &snapshot).ok();
 	};
-	WorldSnapshot snapshot;
+	ObserverSnapshot snapshot;
 	if (!query(snapshot)) {
-		std::cerr << "View unavailable\n";
+		std::cerr << "Observer snapshot unavailable\n";
 		return 3;
 	}
-	Print("view", snapshot);
+	Print("observer-snapshot", snapshot);
 
 	const auto originalSnapshot = snapshot;
-	std::string originalUnitId;
-	for (const auto &unit : originalSnapshot.instances()) {
+	std::string originalObservationId;
+	for (const auto &unit : originalSnapshot.units()) {
 		Query discoveryQuery;
-		discoveryQuery.set_session_id(originalSnapshot.session().session_id());
-		*discoveryQuery.mutable_unit_id() = unit.unit_id();
+		discoveryQuery.set_session_id(originalSnapshot.session_id());
+		*discoveryQuery.mutable_observer() = originalSnapshot.observer();
+		*discoveryQuery.mutable_observation() = unit.identity();
 		OrderDiscovery discovery;
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
 		if (stub->DiscoverOrders(&context, discoveryQuery, &discovery).ok() && unit.kinematics().position().has_known()) {
 			for (const auto &eligibility : discovery.eligibility().items()) {
 				if (eligibility.kind() == ORDER_KIND_IDLE_WAYPOINT) {
-					originalUnitId = unit.unit_id().value();
+					originalObservationId = unit.identity().value();
 					break;
 				}
 			}
 		}
-		if (!originalUnitId.empty()) {
+		if (!originalObservationId.empty()) {
 			break;
 		}
 	}
 	bool changed = false;
 	for (int pollIndex = 0; pollIndex < MAXIMUM_STATUS_POLLS; ++pollIndex) {
 		std::this_thread::sleep_for(POLL_INTERVAL);
-		WorldSnapshot nextSnapshot;
-		if (query(nextSnapshot) && nextSnapshot.session().session_id() != originalSnapshot.session().session_id()) {
+		ObserverSnapshot nextSnapshot;
+		if (query(nextSnapshot) && nextSnapshot.session_id() != originalSnapshot.session_id()) {
 			snapshot = nextSnapshot;
 			changed = true;
 			break;
 		}
 	}
-	const auto originalOwn = std::ranges::find_if(originalSnapshot.instances(), [&](const auto &instance) {
-		return !originalUnitId.empty() && instance.unit_id().value() == originalUnitId;
+	const auto originalOwn = std::ranges::find_if(originalSnapshot.units(), [&](const auto &instance) {
+		return !originalObservationId.empty() && instance.identity().value() == originalObservationId;
 	});
-	if (!changed || originalOwn == originalSnapshot.instances().end()) {
+	if (!changed || originalOwn == originalSnapshot.units().end()) {
 		return 12;
 	}
 
+	OrderResult rejected;
 	OrderRequest stale;
-	stale.set_session_id(originalSnapshot.session().session_id());
+	stale.set_session_id(originalSnapshot.session_id());
 	stale.set_request_id("reload-stale");
-	stale.mutable_unit_id()->set_value(originalOwn->unit_id().value());
-	stale.set_based_on_version(originalSnapshot.observation_version());
+	*stale.mutable_observer() = originalSnapshot.observer();
+	*stale.mutable_observation() = originalOwn->identity();
+	stale.set_based_on_version(originalSnapshot.version());
 	stale.mutable_waypoint()->set_latitude_deg(originalOwn->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
 	stale.mutable_waypoint()->set_longitude_deg(originalOwn->kinematics().position().known().coordinates().longitude_deg());
-	OrderResult rejected;
 	{
 		grpc::ClientContext context;
 		if (!stub->SubmitOrder(&context, stale, &rejected).ok()) {
@@ -98,9 +109,10 @@ int ReloadSmoke(const std::string &endpoint) {
 		return 14;
 	}
 
-	stale.set_session_id(snapshot.session().session_id());
+	stale.set_session_id(snapshot.session_id());
+	*stale.mutable_observer() = snapshot.observer();
 	stale.set_request_id("reload-old-handle");
-	stale.set_based_on_version(snapshot.observation_version());
+	stale.set_based_on_version(snapshot.version());
 	{
 		grpc::ClientContext context;
 		if (!stub->SubmitOrder(&context, stale, &rejected).ok()) {
@@ -118,30 +130,40 @@ int ReloadSmoke(const std::string &endpoint) {
 
 int RouteSmoke(const std::string &endpoint, bool blocked) {
 	auto stub = navalcommand::gateway::v1::Gateway::NewStub(grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials()));
-	auto query = [&](WorldSnapshot &snapshot) {
+	auto query = [&](ObserverSnapshot &snapshot) {
+		Session session;
+		grpc::ClientContext connectContext;
+		connectContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
+		if (!stub->Connect(&connectContext, Query{}, &session).ok() || session.schema_version() != 4) {
+			return false;
+		}
+		Query scopedQuery;
+		scopedQuery.set_session_id(session.session_id());
+		*scopedQuery.mutable_observer() = session.observer();
 		grpc::ClientContext context;
 		context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
-		return stub->GetView(&context, Query{}, &snapshot).ok();
+		return stub->GetView(&context, scopedQuery, &snapshot).ok();
 	};
-	WorldSnapshot snapshot;
+	ObserverSnapshot snapshot;
 	if (!query(snapshot)) {
-		std::cerr << "View unavailable\n";
+		std::cerr << "Observer snapshot unavailable\n";
 		return 3;
 	}
-	Print("view", snapshot);
-	if (snapshot.instances().empty()) {
+	Print("observer-snapshot", snapshot);
+	if (snapshot.units().empty()) {
 		return 4;
 	}
 
-	const UnitInstance *selectedUnit = nullptr;
+	const UnitObservation *selectedUnit = nullptr;
 	for (int attempt = 0; attempt < (blocked ? MAXIMUM_PROTECTED_STATE_POLLS : 1); ++attempt) {
-		for (auto &unit : snapshot.instances()) {
-			if (unit.unit_id().value().empty() || !unit.kinematics().position().has_known()) {
+		for (const auto &unit : snapshot.units()) {
+			if (unit.identity().value().empty() || !unit.kinematics().position().has_known()) {
 				continue;
 			}
 			Query candidateQuery;
-			candidateQuery.set_session_id(snapshot.session().session_id());
-			*candidateQuery.mutable_unit_id() = unit.unit_id();
+			candidateQuery.set_session_id(snapshot.session_id());
+			*candidateQuery.mutable_observer() = snapshot.observer();
+			*candidateQuery.mutable_observation() = unit.identity();
 			OrderDiscovery candidateDiscovery;
 			grpc::ClientContext candidateContext;
 			candidateContext.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
@@ -172,8 +194,9 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	}
 
 	Query discoveryQuery;
-	discoveryQuery.set_session_id(snapshot.session().session_id());
-	*discoveryQuery.mutable_unit_id() = selectedUnit->unit_id();
+	discoveryQuery.set_session_id(snapshot.session_id());
+	*discoveryQuery.mutable_observer() = snapshot.observer();
+	*discoveryQuery.mutable_observation() = selectedUnit->identity();
 	OrderDiscovery discovery;
 	{
 		grpc::ClientContext context;
@@ -184,10 +207,11 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	Print("discovery", discovery);
 
 	OrderRequest waypointRequest;
-	waypointRequest.set_session_id(snapshot.session().session_id());
-	*waypointRequest.mutable_unit_id() = selectedUnit->unit_id();
-	waypointRequest.set_based_on_version(snapshot.observation_version());
-	waypointRequest.set_request_id("smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+	waypointRequest.set_session_id(snapshot.session_id());
+	*waypointRequest.mutable_observer() = snapshot.observer();
+	*waypointRequest.mutable_observation() = selectedUnit->identity();
+	waypointRequest.set_request_id("route-smoke-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+	waypointRequest.set_based_on_version(snapshot.version());
 	waypointRequest.mutable_waypoint()->set_latitude_deg(selectedUnit->kinematics().position().known().coordinates().latitude_deg() + WAYPOINT_LATITUDE_OFFSET_DEGREES);
 	waypointRequest.mutable_waypoint()->set_longitude_deg(selectedUnit->kinematics().position().known().coordinates().longitude_deg());
 	auto submit = [&](const OrderRequest &request) {
@@ -205,6 +229,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 		for (int pollIndex = 0; pollIndex < MAXIMUM_STATUS_POLLS; ++pollIndex) {
 			Query statusQuery;
 			statusQuery.set_session_id(waypointRequest.session_id());
+			*statusQuery.mutable_observer() = waypointRequest.observer();
 			statusQuery.set_request_id(requestId);
 			grpc::ClientContext context;
 			context.set_deadline(std::chrono::system_clock::now() + RPC_TIMEOUT);
@@ -234,7 +259,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 				return 7;
 			}
 		}
-		WorldSnapshot protectedView;
+		ObserverSnapshot protectedView;
 		if (!query(protectedView)) {
 			return 7;
 		}
@@ -251,7 +276,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 			invalidRequest.set_session_id("old");
 		}
 		if (expectedReason == "wrong_side_or_invalid_entity") {
-			invalidRequest.mutable_unit_id()->set_value("opponent-does-not-exist");
+			invalidRequest.mutable_observation()->set_value("opponent-does-not-exist");
 		}
 		if (expectedReason == "invalid_arguments") {
 			invalidRequest.mutable_waypoint()->set_latitude_deg(100);
@@ -279,7 +304,7 @@ int RouteSmoke(const std::string &endpoint, bool blocked) {
 	if (duplicate.stage() != MOVEMENT_OBSERVED) {
 		return 10;
 	}
-	WorldSnapshot finalView;
+	ObserverSnapshot finalView;
 	if (!query(finalView)) {
 		return 11;
 	}
