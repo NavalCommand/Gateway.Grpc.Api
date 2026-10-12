@@ -12,4 +12,4 @@ cmake --build o/windows-msvc-release --parallel 8
 ctest --test-dir o/windows-msvc-release --output-on-failure
 ```
 
-Internal dependencies use shared Build.CMake and optional ignored Build.Local.cmake registrations. Windows uses x64-windows-static and static MSVC CRT. Generated artifacts stay under o/. Managed builds additionally require the configured game/reference context; see Docs/MANAGED_BUILD.md. New client repositories are not yet populated remotely, so use local source registrations for the current checkout.
+Internal dependencies use shared Build.CMake and optional ignored Build.Local.cmake registrations. Windows uses x64-windows-static and static MSVC CRT. Generated artifacts stay under o/. Managed builds additionally require the configured game/reference context; see Docs/MANAGED_BUILD.md.
