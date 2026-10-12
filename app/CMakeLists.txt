@@ -1,6 +1,0 @@
-add_executable(naval-cli
-        NavalCommand/Gateway/Grpc/Api/Cli.cpp
-        "${PROJECT_SOURCE_DIR}/test/NavalCommand/Gateway/Grpc/Api/ManualSmoke.cpp")
-target_link_libraries(naval-cli PRIVATE Gateway.Grpc.Api protobuf::libprotobuf)
-target_include_directories(naval-cli PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/test")
-NavalCommandConfigureTarget(naval-cli)

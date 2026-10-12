@@ -12,7 +12,11 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortLambdasOnASingleLine: None
 SortIncludes: CaseSensitive
-BreakBeforeBraces: Custom
+BreakBeforeBraces: Allman
+NamespaceIndentation: All
+FixNamespaceComments: false
+PointerAlignment: Left
+ReferenceAlignment: Left
 BraceWrapping:
   AfterExternBlock: true
 IndentExternBlock: Indent

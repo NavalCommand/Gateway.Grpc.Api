@@ -1,0 +1,23 @@
+syntax = "proto3";
+package navalcommand.gateway.v2;
+import "navalcommand/gateway/v2/domain.proto";
+
+service Gateway {
+  // Stream lifetime owns the connection and pause claim. Server teardown of
+  // a cancelled stream queues release on the permitted simulator thread.
+  rpc Connect(ConnectionRequest) returns (stream ConnectionState);
+  rpc Acquire(AcquireRequest) returns (Revision);
+  rpc Read(ReadRequest) returns (Result);
+  rpc Apply(ApplyRequest) returns (Result);
+}
+message ConnectionRequest {}
+message ConnectionState { string client = 1; string session = 2; }
+message AcquireRequest { string client = 1; Scope scope = 2; }
+message Revision {
+  string token = 1;
+  string session = 2;
+  uint64 revision = 3;
+  double captured_at_seconds = 4;
+}
+message ReadRequest { string client = 1; string token = 2; Query query = 3; }
+message ApplyRequest { string client = 1; Control control = 2; }
